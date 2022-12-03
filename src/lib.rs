@@ -1,11 +1,13 @@
 use rustls::{OwnedTrustAnchor, ClientConfig, RootCertStore, ClientConnection};
-use anyhow::{Result as AResult, anyhow};
-use std::sync::Arc;
-use std::net::TcpStream;
-use std::io::{Read, Write};
+use anyhow::{Result as AResult, bail};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::io::{self, ErrorKind, Read, Write};
 use std::process::Command;
 use std::time::Duration;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::mem;
 use clap::Parser;
 
 #[derive(Parser)]
@@ -27,10 +29,15 @@ pub struct Cli {
 	#[arg(short, long)]
 	password: String,
 
+	/// interval (in seconds) at which to run even if no email arrives
+	#[arg(short, long)]
+	interval: Option<u64>,
+
 	/// command to run when new mail arrives
 	#[arg(short, long)]
 	command: PathBuf,
 
+	/// show all server responses
 	#[arg(short, long, action = clap::ArgAction::Count)]
 	verbose: u8,
 }
@@ -44,6 +51,26 @@ enum State {
 }
 
 pub fn run(cli: &Cli) -> AResult<()> {
+	// a mutex to avoid running the command concurrently
+	let mutex_mainthread = Arc::new(Mutex::new(()));
+	let mutex_subthread = Arc::clone(&mutex_mainthread);
+
+	if let Some(interval) = cli.interval {
+		let cmd = cli.command.clone();
+		thread::spawn(move || {
+			loop {
+				thread::sleep(Duration::from_secs(interval));
+				let lock = mutex_subthread.lock().unwrap();
+				println!("Interval timer expired, running command ...");
+				Command::new(cmd.as_os_str())
+					.output()
+					.expect("command execution failed");
+				println!("Command finished.");
+				mem::drop(lock);
+			}
+		});
+	}
+
 	let tls_config = ClientConfig::builder()
 		.with_safe_defaults()
 		.with_root_certificates(RootCertStore {
@@ -54,12 +81,16 @@ pub fn run(cli: &Cli) -> AResult<()> {
 		})
 		.with_no_client_auth();
 
-	let mut buffer = [0; 2048];
+	let mut buffer = [0u8; 2048];
 
 	let mut tls_client = ClientConnection::new(
 		Arc::new(tls_config),
 		cli.server.as_str().try_into().unwrap())?;
-	let mut socket = TcpStream::connect((cli.server.as_str(), cli.port))?;
+	let addrs = (cli.server.as_str(), cli.port)
+		.to_socket_addrs()
+		.map_err(|e|io::Error::new(ErrorKind::NotConnected, e.to_string()))?
+		.collect::<Vec<_>>();
+	let mut socket = TcpStream::connect(addrs.as_slice())?;
 	let mut state = State::Unauthenticated;
 
 	socket.set_read_timeout(Some(Duration::from_secs(10*60)))?;
@@ -94,6 +125,12 @@ pub fn run(cli: &Cli) -> AResult<()> {
 
 			for response in responses {
 				if cli.verbose > 0 {
+					if state == State::Unauthenticated {
+						if let Some(suite) = tls_client.negotiated_cipher_suite() {
+							println!("negotiated cipher suite: {:?}", suite);
+						}
+					}
+
 					println!("{}", String::from_utf8_lossy(response));
 				}
 
@@ -107,20 +144,24 @@ pub fn run(cli: &Cli) -> AResult<()> {
 						tls_client.writer().write(b"A002 select inbox\r\n")?;
 						state = State::Inbox;
 					} else if response.starts_with(b"A001") {
-						return Err(anyhow!("The server rejected authentication"));
+						bail!("The server rejected authentication");
 					},
 					State::Inbox => if response.starts_with(b"A002 OK") {
 						tls_client.writer().write(b"A003 idle\r\n")?;
 						state = State::Idling;
 					} else if response.starts_with(b"A002") {
-						return Err(anyhow!("Selecting inbox failed"));
+						bail!("Selecting inbox failed");
 					},
 					State::Idling => if response.starts_with(b"+ idling") {
 						println!("Connected and idling ...");
 					} else if response.starts_with(b"*") && response.ends_with(b"EXISTS") {
-						println!("NEW EMAIL!");
+						let lock = mutex_mainthread.lock().unwrap();
+						println!("New email, running command ...");
 						Command::new(cli.command.as_os_str())
-							.output()?;
+							.output()
+							.expect("command execution failed");
+						println!("Command finished.");
+						mem::drop(lock);
 					}
 				}
 			}
@@ -131,4 +172,14 @@ pub fn run(cli: &Cli) -> AResult<()> {
 	}
 
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_dns_lookup() {
+
+	}
 }
