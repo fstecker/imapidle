@@ -3,14 +3,14 @@ use anyhow::{Result as AResult, bail};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::io::{self, ErrorKind, Read, Write};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::mem;
 use clap::Parser;
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[command(about = "Uses IMAP IDLE to run a command whenever a new email arrives", long_about = None)]
 pub struct Cli {
 	/// IMAP server domain
@@ -48,6 +48,68 @@ enum State {
 	Authenticated,
 	Inbox,
 	Idling
+}
+
+/// runs the command if one of the following conditions is satisfied:
+/// - `new_mail` is true
+/// - the command hasn't been run yet
+/// - `cli.interval` is set and the last run was at least `cli.interval` minus 1 second ago
+///
+/// The return value is the duration to wait until command should be run again
+/// (assuming no new mail arrives in the meantime). This is `cli.interval` if
+/// the command was run, and `cli.interval` minus the time elapsed since the last run
+/// in case the command was not run.
+/// If `cli.interval` is `None`, the return value will be `None`.
+
+pub fn run_command_if_needed(cli: &Cli, lastrun_mutex: &Mutex<Option<SystemTime>>, new_mail: bool) -> Option<Duration> {
+	// locks the mutex until the end of the function, also preventing that the command is run concurrently
+	let mut last = lastrun_mutex.lock().unwrap();
+	let run;
+
+	if new_mail {
+		run = true;
+	} else {
+		match *last {
+			None => {
+				run = true;
+			},
+			Some(last_inner) => {
+				match cli.interval {
+					None => {
+						run = false;
+					},
+					Some(int) => {
+						let min_duration = Duration::from_secs(int - 1);
+						let duration = last_inner.elapsed().unwrap_or(Duration::ZERO);
+						if duration > min_duration {
+							run = true;
+						} else {
+							run = false;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if run {
+		println!("Running command ...");
+		Command::new(cli.command.as_os_str())
+			.output()
+			.expect("command execution failed");
+		println!("Command finished.");
+
+		*last = Some(SystemTime::now());
+	}
+
+	// subtract the time already elapsed since last run
+	return cli.interval.map(|int| {
+		Duration::from_secs(int).saturating_sub(
+			last
+			.expect("command should have run at least once")
+			.elapsed()
+			.unwrap_or(Duration::ZERO))
+	});
 }
 
 pub fn run(cli: &Cli) -> AResult<()> {
@@ -94,30 +156,20 @@ pub fn run(cli: &Cli) -> AResult<()> {
 	let mut state = State::Unauthenticated;
 
 	socket.set_read_timeout(Some(Duration::from_secs(10*60)))?;
-//	println!("read timeout = {:?}, write timeout = {:?}", socket.read_timeout(), socket.write_timeout());
 
 	loop {
-//		println!("wants_read = {}, wants_write = {}, is_handshaking = {}",
-//				 tls_client.wants_read(),
-//				 tls_client.wants_write(),
-//				 tls_client.is_handshaking());
-
 		if tls_client.is_handshaking() {
 			let (_i, _o) = tls_client.complete_io(&mut socket)?;
-//			println!("handshake, read {_i} bytes, wrote {_o} bytes");
 		} else if tls_client.wants_write() {
 			let _o = tls_client.write_tls(&mut socket)?;
-//			println!("wrote {_o} bytes");
 		} else if tls_client.wants_read() {
 			let _i = tls_client.read_tls(&mut socket)?;
-//			println!("read {_i} TLS bytes");
 
 			if tls_client.process_new_packets()?.plaintext_bytes_to_read() == 0 {
 				continue;
 			}
 
 			let len = tls_client.reader().read(&mut buffer)?;
-//			println!("read {len} plain bytes");
 
 			let responses = buffer[0..len]
 				.split(|&x|x == b'\r' || x == b'\n')
@@ -168,7 +220,6 @@ pub fn run(cli: &Cli) -> AResult<()> {
 		} else {
 			break;
 		}
-
 	}
 
 	Ok(())
