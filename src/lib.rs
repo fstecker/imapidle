@@ -150,7 +150,7 @@ pub fn run() -> AResult<()> {
 				let elapsed = status.last_run.elapsed().unwrap_or_default();
 				let run = status.connected && elapsed >= interval_duration;
 
-				println!("time = {:?}, run = {}", SystemTime::now(), run);
+				// println!("time = {:?}, run = {}", SystemTime::now(), run);
 
 				if run {
 					println!("Interval timer expired, running command ...");
@@ -198,7 +198,8 @@ pub fn run() -> AResult<()> {
 		status.last_run = SystemTime::now();
 	};
 
-	// reconnect in an infinite loop
+	// reconnect in an infinite loop, with exponentially increasing wait times up to 1/2 hour
+	let mut time_to_reconnect: u64 = 1;
 	loop {
 		return match connect_and_idle(&cli, connect_callback , mail_callback) {
 			Ok(_) => Ok(()),
@@ -206,18 +207,19 @@ pub fn run() -> AResult<()> {
 				Some(io_err) if CONNECTION_LOST_ERRORS.contains(&io_err.kind()) => {
 					connection_status.lock().unwrap().connected = false;
 
-					let secs_to_reconnect = 10;
-					println!("Connection lost, reconnecting in {secs_to_reconnect} seconds");
-					thread::sleep(Duration::from_secs(secs_to_reconnect));
+					time_to_reconnect = 1;
+					println!("Connection lost, reconnecting in {time_to_reconnect} seconds");
+					thread::sleep(Duration::from_secs(time_to_reconnect));
 
 					continue;
 				},
 				Some(io_err) if CANT_CONNECT_ERRORS.contains(&io_err.kind()) => {
 					connection_status.lock().unwrap().connected = false;
 
-					let secs_to_reconnect = 10*60;
-					println!("Cannot connect currently, retrying in {secs_to_reconnect} seconds");
-					thread::sleep(Duration::from_secs(secs_to_reconnect));
+					time_to_reconnect = u64::min(time_to_reconnect*2, 1800);
+
+					println!("Cannot connect currently, retrying in {time_to_reconnect} seconds");
+					thread::sleep(Duration::from_secs(time_to_reconnect));
 
 					continue;
 				},
@@ -267,7 +269,7 @@ pub fn connect_and_idle<F: Fn(), G: Fn()>(cli: &Cli,
 	let mut socket = TcpStream::connect(addrs.as_slice())?;
 	let mut state = ImapState::Unauthenticated;
 
-	socket.set_read_timeout(Some(Duration::from_secs(10*60)))?;
+	socket.set_read_timeout(Some(Duration::from_secs(120)))?;
 
 	loop {
 		if tls_client.is_handshaking() {
