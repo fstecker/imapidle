@@ -43,67 +43,6 @@ pub struct Cli {
 	verbose: u8,
 }
 
-/// runs the command if one of the following conditions is satisfied:
-/// - `new_mail` is true
-/// - the command hasn't been run yet
-/// - `cli.interval` is set and the last run was at least `cli.interval` minus 1 second ago
-///
-/// The return value is the duration to wait until command should be run again
-/// (assuming no new mail arrives in the meantime). This is `cli.interval` if
-/// the command was run, and `cli.interval` minus the time elapsed since the last run
-/// in case the command was not run.
-/// If `cli.interval` is `None`, the return value will be `None`.
-pub fn run_command_if_needed(cli: &Cli, lastrun_mutex: &Mutex<Option<SystemTime>>, new_mail: bool) -> Option<Duration> {
-	// locks the mutex until the end of the function, also preventing that the command is run concurrently
-	let mut last = lastrun_mutex.lock().unwrap();
-	let run;
-
-	if new_mail {
-		run = true;
-	} else {
-		match *last {
-			None => {
-				run = true;
-			},
-			Some(last_inner) => {
-				match cli.interval {
-					None => {
-						run = false;
-					},
-					Some(int) => {
-						let min_duration = Duration::from_secs(int - 1);
-						let duration = last_inner.elapsed().unwrap_or(Duration::ZERO);
-						if duration > min_duration {
-							run = true;
-						} else {
-							run = false;
-						}
-					}
-				}
-			}
-		}
-	}
-
-	if run {
-		println!("Running command ...");
-		Command::new(cli.command.as_os_str())
-			.output()
-			.expect("command execution failed");
-		println!("Command finished.");
-
-		*last = Some(SystemTime::now());
-	}
-
-	// subtract the time already elapsed since last run
-	return cli.interval.map(|int| {
-		Duration::from_secs(int).saturating_sub(
-			last
-			.expect("command should have run at least once")
-			.elapsed()
-			.unwrap_or(Duration::ZERO))
-	});
-}
-
 #[derive(Debug)]
 struct Status {
 	connected: bool,
@@ -173,12 +112,12 @@ pub fn run() -> AResult<()> {
 
 	// what to do as soon as we're connected
 	let connect_callback = || {
-		if let Some(th) = &timer_handle {
-			connection_status.lock().unwrap().connected = true;
+		connection_status.lock().unwrap().connected = true;
 
-			// we unpark the thread after reconnecting since a common cause of
-			// disconnects is suspend, after which the sleep timer might not do what
-			// we want
+		// we unpark the thread after reconnecting since a common cause of
+		// disconnects is suspend, after which the sleep timer might not do what
+		// we want
+		if let Some(th) = &timer_handle {
 			th.thread().unpark();
 		}
 	};
@@ -243,10 +182,7 @@ enum ImapState {
 
 /// establish a connection to IMAP server, log in, run IDLE command, and wait
 /// for mail to arrive
-pub fn connect_and_idle<F: Fn(), G: Fn()>(cli: &Cli,
-												 connected_callback: F,
-												 mail_callback: G)
-												 -> AResult<()> {
+pub fn connect_and_idle<F: Fn(), G: Fn()>(cli: &Cli, connected_callback: F, mail_callback: G) -> AResult<()> {
 	let tls_config = ClientConfig::builder()
 		.with_safe_defaults()
 		.with_root_certificates(RootCertStore {
