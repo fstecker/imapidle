@@ -104,7 +104,12 @@ pub fn run() -> AResult<()> {
 
 					wait_time = interval_duration;
 				} else {
-					wait_time = interval_duration - elapsed;
+					// wait for the remaining time until interval_duration
+					// if the time is already up, that means we're not connected currently
+					// in that case, just wait 1/2 hour, once the connection is reestablished
+					// the main thread will unpark us anyway
+					wait_time = interval_duration.checked_sub(elapsed)
+						.unwrap_or(Duration::from_secs(1800));
 				}
 			}
 		})
