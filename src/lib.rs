@@ -269,9 +269,9 @@ pub fn connect_and_idle<F: Fn(), G: Fn()>(cli: &Cli, connected_callback: F, mail
 				}
 			}
 		} else {
-			break;
+			// if wants_read() and wants_write() are both false, this usually means the connection was closed
+			// so just return "Interrupted" and reconnect after a few seconds
+			return Err(io::Error::new(ErrorKind::Interrupted, "Connection was closed by server").into());
 		}
 	}
-
-	Ok(())
 }
