@@ -6,7 +6,7 @@ Although this is quite minimal and only implements a tiny subset of the IMAP pro
 
 ## Installation ##
 
-Get [rust] and run
+Get [Rust] and run
 
     cargo build --release
 
@@ -33,13 +33,15 @@ The output of `imapidle --help` does a good job at explaining how to use it:
 
 Note that it only supports TLS encrypted IMAP and plain password authentication. Also, it currently reads the password from the command line, which isn't a great thing to do. I might change that eventually.
 
-## Why? ##
+## Goals ##
 
-Rust might not be the canonical programming language to do something like this in. And also, this probably already exists somewhere in a more complete and polished form. So this might not useful for anyone else. But I had three goals in making this:
+I made this for the following reasons:
 
 1. I wanted my emails to arrive faster and without having to manually hit the refresh button.
-2. I wanted to find out how IMAP works and why it's often so slow (I'm still not sure about the latter).
-3. I wanted to try using rust for something practical and see how well it works. The result is it worked, and I would do it again.
+2. I wanted to find out how IMAP works and why it's often so slow (I'm still not really sure).
+3. I wanted to try using Rust for something practical and see how well it works. It worked pretty well.
+
+In terms of actual usability, this works fine for me, but I'm sure there are better alternatives out there.
 
 [Rust]: https://www.rust-lang.org/
 [IMAP]: https://en.wikipedia.org/wiki/Internet_Message_Access_Protocol
