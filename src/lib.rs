@@ -2,12 +2,13 @@
 
 use rustls::{OwnedTrustAnchor, ClientConfig, RootCertStore, ClientConnection};
 use anyhow::{Result as AResult, bail};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{TcpStream, ToSocketAddrs, SocketAddr};
 use std::io::{self, ErrorKind, Read, Write, Error as IOError};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
 use std::thread;
 use clap::Parser;
 
@@ -21,6 +22,10 @@ pub struct Cli {
 	/// IMAP server port
 	#[arg(long, default_value_t = 993)]
 	port: u16,
+
+	// the resolved address(es)
+	#[arg(skip)]
+	addrs: RefCell<Vec<SocketAddr>>,
 
 	/// IMAP user name
 	#[arg(short, long)]
@@ -46,7 +51,7 @@ pub struct Cli {
 #[derive(Debug)]
 struct Status {
 	connected: bool,
-	last_run: SystemTime
+	last_run: SystemTime,
 }
 
 const CONNECTION_LOST_ERRORS: &[ErrorKind] = &[
@@ -162,7 +167,11 @@ pub fn run() -> AResult<()> {
 
 					time_to_reconnect = u64::min(time_to_reconnect*2, 1800);
 
+					if cli.verbose > 0 {
+						println!("Error: {:?}", err);
+					}
 					println!("Cannot connect currently, retrying in {time_to_reconnect} seconds");
+
 					thread::sleep(Duration::from_secs(time_to_reconnect));
 
 					continue;
@@ -203,10 +212,16 @@ pub fn connect_and_idle<F: Fn(), G: Fn()>(cli: &Cli, connected_callback: F, mail
 	let mut tls_client = ClientConnection::new(
 		Arc::new(tls_config),
 		cli.server.as_str().try_into().unwrap())?;
-	let addrs = (cli.server.as_str(), cli.port)
-		.to_socket_addrs()
-		.map_err(|e|io::Error::new(ErrorKind::NotConnected, e.to_string()))?
-		.collect::<Vec<_>>();
+
+	let mut addrs = cli.addrs.borrow_mut();
+	if addrs.is_empty() {
+		addrs.extend(
+			(cli.server.as_str(), cli.port)
+				.to_socket_addrs()
+				.map_err(|e|io::Error::new(ErrorKind::NotConnected, e.to_string()))?
+		);
+	}
+
 	let mut socket = TcpStream::connect(addrs.as_slice())?;
 	let mut state = ImapState::Unauthenticated;
 
